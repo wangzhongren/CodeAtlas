@@ -35,10 +35,10 @@ SYSTEM_PROMPT = (
 class TopologyAnalyzer:
     def __init__(self):
         self.client = OpenAI(
-            api_key=os.getenv("CODEATLAS_LLM_API_KEY", "your-api-key-here"),
-            base_url=os.getenv("CODEATLAS_LLM_BASE_URL", "https://aiproxy2.abujlb.com/deepseek/v1"),
+            api_key=os.getenv("CODEATLAS_LLM_API_KEY"),
+            base_url=os.getenv("CODEATLAS_LLM_BASE_URL"),
         )
-        self.model = os.getenv("CODEATLAS_LLM_MODEL", "deepseek-v4-pro")
+        self.model = os.getenv("CODEATLAS_LLM_MODEL")
 
     def _clean_llm_output(self, raw: str) -> str:
         """Strip markdown fences and surrounding whitespace from LLM output."""
