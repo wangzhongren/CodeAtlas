@@ -127,4 +127,6 @@ cd frontend && npm run build
 
 ## License
 
-MIT
+CodeAtlas is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for the full text.
+
+Copyright 2026 wangzhongren
