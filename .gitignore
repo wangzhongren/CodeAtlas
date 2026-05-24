@@ -1,0 +1,16 @@
+node_modules/
+dist/
+dist-electron/
+release/
+__pycache__/
+*.pyc
+*.pyo
+.zhitu/
+.zhitu-logs/
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.local
+.DS_Store
+Thumbs.db

@@ -1,0 +1,92 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --md-surface: #1a1c1e;
+  --md-surface-variant: #282a2d;
+  --md-on-surface: #e3e2e6;
+  --md-on-surface-variant: #c4c7c5;
+  --md-outline: #8e918f;
+  --md-outline-variant: #444746;
+  --md-primary: #8ab4f8;
+  --md-primary-container: #003a75;
+  --md-on-primary-container: #d6e3ff;
+  --md-secondary: #b4d7a8;
+  --md-tertiary: #fdd663;
+  --md-error: #f28b82;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: 'Google Sans', 'Roboto', system-ui, -apple-system, sans-serif;
+  background: var(--md-surface);
+  color: var(--md-on-surface);
+}
+
+#root {
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--md-outline-variant); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--md-outline); }
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+@keyframes edge-flow {
+  to { stroke-dashoffset: -12; }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.3s ease-out;
+}
+
+.animate-pulse-dot {
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+
+.animate-edge {
+  stroke-dasharray: 8 4;
+  animation: edge-flow 0.8s linear infinite;
+}
+
+/* Google-style card elevation */
+.card-elevation {
+  box-shadow:
+    0 1px 2px rgba(0,0,0,0.3),
+    0 1px 3px 1px rgba(0,0,0,0.15);
+}
+
+.card-elevation-hover:hover {
+  box-shadow:
+    0 1px 2px rgba(0,0,0,0.3),
+    0 2px 6px 2px rgba(0,0,0,0.15);
+}
+
+/* Node entrance */
+.node-enter {
+  animation: node-pop 0.35s cubic-bezier(0.05, 0.7, 0.1, 1.0);
+}
+
+@keyframes node-pop {
+  from { opacity: 0; transform: scale(0.6); }
+  to { opacity: 1; transform: scale(1); }
+}
