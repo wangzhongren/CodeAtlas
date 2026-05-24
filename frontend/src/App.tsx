@@ -7,6 +7,7 @@ import type { CodeSelection } from './components/CodeViewer';
 import FeatureList from './components/FeatureList';
 import FeatureDetail from './components/FeatureDetail';
 import AgentPanel from './components/AgentPanel';
+import RunPage from './components/RunPage';
 import ResizeHandle from './components/ResizeHandle';
 import StatusBar from './components/StatusBar';
 import TitleBar from './components/TitleBar';
@@ -32,10 +33,14 @@ export default function App() {
     setFileVersion((v) => v + 1);
     setRefreshKey((k) => k + 1);
   }, []);
+  const triggerFeatureReload = useCallback(() => {
+    setRefreshKey((k) => k + 1);
+  }, []);
 
   const [leftW, setLeftW] = useState(INITIAL_LEFT);
   const [rightW, setRightW] = useState(INITIAL_RIGHT);
   const [bottomH, setBottomH] = useState(INITIAL_BOTTOM);
+  const [showRunPage, setShowRunPage] = useState(false);
 
   const handleOpenProject = useCallback((p: string) => {
     setProjectPath(p);
@@ -115,6 +120,17 @@ export default function App() {
           <span className="text-[10px]" style={{ color: '#5c6166' }}>{projectPath}</span>
         </div>
         <div className="flex items-center gap-3">
+          <button
+            onClick={() => setShowRunPage(true)}
+            title="AI auto-run: analyze, build, run & fix"
+            className="flex items-center gap-1.5 text-[10px] px-3 py-1 rounded-md font-medium transition-all hover:opacity-80 active:scale-[0.97]"
+            style={{ background: '#1a3350', color: '#8ab4f8', border: '1px solid #8ab4f830' }}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="#8ab4f8" stroke="none">
+              <polygon points="5,3 19,12 5,21" />
+            </svg>
+            Run
+          </button>
           <StatusBar />
           <button onClick={handleCloseProject} className="text-[10px] px-2 py-0.5 rounded-md hover:bg-white/5 transition-colors" style={{ color: '#8e918f' }}>Close Project</button>
         </div>
@@ -156,6 +172,7 @@ export default function App() {
                 onNavigateToFile={navigateToFile}
                 onDrillDown={handleDrillDown}
                 onSendToAgent={setAgentContext}
+                onReloadFeatures={triggerFeatureReload}
               />
             </div>
           </div>
@@ -167,6 +184,15 @@ export default function App() {
           <AgentPanel projectPath={projectPath} openFilePath={openFile} selection={selection} onClearSelection={() => setSelection(null)} injectContext={agentContext} onConsumeContext={() => setAgentContext('')} onFileChanged={handleFileChanged} />
         </div>
       </div>
+
+      {/* Run Page overlay */}
+      {showRunPage && projectPath && (
+        <RunPage
+          projectPath={projectPath}
+          onClose={() => setShowRunPage(false)}
+          onFileChanged={handleFileChanged}
+        />
+      )}
     </div>
   );
 }

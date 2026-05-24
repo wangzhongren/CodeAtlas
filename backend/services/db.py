@@ -55,11 +55,19 @@ def _init_tables(conn: sqlite3.Connection):
             functions TEXT DEFAULT '[]',
             generated INTEGER DEFAULT 0,
             children_json TEXT DEFAULT '[]',
+            issues_json TEXT DEFAULT '[]',
             created_at TEXT DEFAULT (datetime('now')),
             updated_at TEXT DEFAULT (datetime('now'))
         );
         CREATE INDEX IF NOT EXISTS idx_features_parent ON features(parent_id);
         CREATE INDEX IF NOT EXISTS idx_features_project ON features(project_path);
+        """)
+    # Migration: add issues_json column
+    try:
+        conn.execute("ALTER TABLE features ADD COLUMN issues_json TEXT DEFAULT '[]'")
+    except sqlite3.OperationalError:
+        pass  # column already exists
+    conn.executescript("""
 
         CREATE TABLE IF NOT EXISTS change_queue (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -103,6 +111,7 @@ def feature_to_row(node: dict) -> tuple:
         _to_json(functions) if not isinstance(functions, list) else json.dumps(functions, ensure_ascii=False),
         1 if node.get("generated") else 0,
         children_json,
+        _to_json(node.get("issues_json", "[]")) if not isinstance(node.get("issues_json", "[]"), list) else json.dumps(node.get("issues_json", []), ensure_ascii=False),
     )
 
 
@@ -158,8 +167,8 @@ def save_features(project_path: str, features: List[dict]):
             conn.execute(
                 """INSERT OR REPLACE INTO features
                    (id, project_path, label, level, parent_id, description, flow_description,
-                    files, functions, generated, children_json, updated_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,datetime('now'))""",
+                    files, functions, generated, children_json, issues_json, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))""",
                 feature_to_row(f),
             )
     conn.execute("UPDATE meta SET value = ? WHERE key = ?", (datetime.now().isoformat(), f"last_updated_{project_path}"))
@@ -198,6 +207,17 @@ def _find_in_children(children: List[dict], node_id: str) -> Optional[dict]:
         if found:
             return found
     return None
+
+
+def update_feature_overview(project_path: str, node_id: str, node: dict):
+    """Update overview data for a feature node."""
+    conn = _connect(project_path)
+    with conn:
+        conn.execute(
+            "UPDATE features SET flow_description = ?, issues_json = ?, updated_at = datetime('now') WHERE id = ?",
+            (node.get("flow_description", ""), node.get("issues_json", "[]"), node_id),
+        )
+    logger.info(f"[DB] Updated overview for {node_id}")
 
 
 def update_feature_children(project_path: str, parent_id: str, children: list):
@@ -259,8 +279,8 @@ def upsert_feature(project_path: str, node: dict):
             conn.execute(
                 """INSERT OR REPLACE INTO features
                    (id, project_path, label, level, parent_id, description, flow_description,
-                    files, functions, generated, children_json, updated_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,datetime('now'))""",
+                    files, functions, generated, children_json, issues_json, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))""",
                 feature_to_row(node),
             )
 

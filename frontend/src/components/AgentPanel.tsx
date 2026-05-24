@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useMemo } from 'react';
 import type { FileContent } from '../types/electron.d';
 import type { CodeSelection } from './CodeViewer';
 import { useTaskStore } from '../store/taskStore';
+import { streamAgentResponse } from '../utils/agentStream';
 
 interface Props {
   projectPath: string | null;
@@ -31,7 +32,7 @@ interface Message {
     end_line?: number;
     after_line?: number;
     content?: string;
-    pending?: boolean; // needs user approval for shell commands
+    pending?: boolean;
   }>;
   shell?: ShellState;
   needsApproval?: boolean;
@@ -83,7 +84,6 @@ function MessageContent({ text }: { text: string }) {
   );
 }
 
-/* ── Operation chip colors ── */
 const OP_STYLE: Record<string, { icon: string; color: string; bg: string }> = {
   insert_lines: { icon: '+', color: '#3fb950', bg: '#12261a' },
   replace_lines: { icon: '~', color: '#d29922', bg: '#272115' },
@@ -94,7 +94,6 @@ const OP_STYLE: Record<string, { icon: string; color: string; bg: string }> = {
   check_log: { icon: '?', color: '#8b949e', bg: '#1c1c1c' },
 };
 
-/* ═════════════════════════════════════════ */
 export default function AgentPanel({ projectPath, openFilePath, selection, onClearSelection, injectContext, onConsumeContext, onFileChanged }: Props) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
@@ -124,9 +123,8 @@ export default function AgentPanel({ projectPath, openFilePath, selection, onCle
     setInput('');
     abortRef.current = new AbortController();
 
-    // Prepend injected context if present
     if (injectContext) {
-      instruction = `【从功能分析中获取的上下文】\n${injectContext}\n\n【用户指令】\n${instruction}`;
+      instruction = `${injectContext}\n\n${instruction}`;
       onConsumeContext?.();
     }
 
@@ -155,7 +153,6 @@ export default function AgentPanel({ projectPath, openFilePath, selection, onCle
         }
       }
 
-      // Add project info directly to instruction so LLM always sees it
       let fullInstruction = instruction;
       if (projectPath) {
         const projName = projectPath.split(/[\\/]/).pop() || projectPath;
@@ -171,70 +168,31 @@ export default function AgentPanel({ projectPath, openFilePath, selection, onCle
         selectionCtx = { file: relPath, text: selection.text, lines: `L${selection.startLine}-L${selection.endLine}` };
       }
 
-      // Include last 10 messages as conversation history
       const history = messages.map((m) => ({ role: m.role, content: m.content }));
-      const body: Record<string, any> = { instruction, open_file: openFileCtx, file_tree: fileTree, history };
+      const body: Record<string, any> = { instruction: fullInstruction, open_file: openFileCtx, file_tree: fileTree, history };
       if (selectionCtx) body.selection = selectionCtx;
 
       setMessages((prev) => [...prev, { role: 'agent', content: '', operations: [] }]);
 
-      const res = await fetch('/api/v1/agent/chat/stream', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-        signal: abortRef.current?.signal,
+      const { message: fullMessage, operations: finalOps } = await streamAgentResponse(
+        body,
+        abortRef.current?.signal,
+        (token) => {
+          setMessages((prev) => {
+            const u = [...prev];
+            const last = u[u.length - 1];
+            if (last?.role === 'agent') u[u.length - 1] = { ...last, content: last.content + token };
+            return u;
+          });
+        },
+      );
+
+      setMessages((prev) => {
+        const u = [...prev];
+        const last = u[u.length - 1];
+        if (last?.role === 'agent') u[u.length - 1] = { ...last, content: fullMessage, operations: finalOps, needsApproval: finalOps.some((o: any) => o.pending) };
+        return u;
       });
-
-      const reader = res.body?.getReader();
-      if (!reader) throw new Error('No response body');
-
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let fullMessage = '';
-      let finalOps: any[] = [];
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const parts = buffer.split('\n\n');
-        buffer = parts.pop() || '';
-
-        for (const part of parts) {
-          const lines = part.split('\n');
-          let eventType = '', eventData = '';
-          for (const line of lines) {
-            if (line.startsWith('event: ')) eventType = line.slice(7);
-            else if (line.startsWith('data: ')) eventData = line.slice(6);
-          }
-
-          if (eventType === 'token') {
-            fullMessage += eventData;
-            setMessages((prev) => {
-              const u = [...prev];
-              const last = u[u.length - 1];
-              if (last?.role === 'agent') u[u.length - 1] = { ...last, content: fullMessage };
-              return u;
-            });
-          } else if (eventType === 'done') {
-            try {
-              const d = JSON.parse(eventData);
-              fullMessage = d.message || fullMessage;
-              const ops = (d.operations || []).map((op: any) => ({
-                ...op,
-                pending: op.type === 'run_shell',
-              }));
-              finalOps = ops;
-              setMessages((prev) => {
-                const u = [...prev];
-                const last = u[u.length - 1];
-                if (last?.role === 'agent') u[u.length - 1] = { ...last, content: fullMessage, operations: ops, needsApproval: ops.some((o: any) => o.pending) };
-                return u;
-              });
-            } catch { /* ignore */ }
-          }
-        }
-      }
 
       // Execute operations with auto-feedback loop for read_file
       let ops = [...finalOps];
@@ -246,7 +204,6 @@ export default function AgentPanel({ projectPath, openFilePath, selection, onCle
         const readOps = ops.filter((o) => o.type === 'read_file');
         const execOps = ops.filter((o) => o.type !== 'read_file');
 
-        // Execute read_file operations first, collect content
         for (const op of readOps) {
           try {
             let filePath = op.file || '';
@@ -263,17 +220,15 @@ export default function AgentPanel({ projectPath, openFilePath, selection, onCle
           }
         }
 
-        // Separate pending (shell) from auto-run ops
         const autoOps = execOps.filter((o) => !o.pending);
         const pendingShell = execOps.filter((o) => o.pending);
         allEditingOps.push(...execOps);
         pendingShellRef.current.push(...pendingShell);
         pendingOpsRef.current = allEditingOps;
 
-        // If there are pending shell ops, STOP here and wait for approval
         if (pendingShell.length > 0) {
-          setSending(false); // release input (but don't finalize)
-          return; // exit handleSend — resume from handleApprove
+          setSending(false);
+          return;
         }
 
         for (const op of autoOps) {
@@ -293,7 +248,6 @@ export default function AgentPanel({ projectPath, openFilePath, selection, onCle
           }
         }
 
-        // If we read files, feed them back to agent for follow-up
         if (readOps.length > 0 && extraContext) {
           const followBody: Record<string, any> = {
             instruction: loopGuard >= 49
@@ -306,57 +260,25 @@ export default function AgentPanel({ projectPath, openFilePath, selection, onCle
 
           setMessages((prev) => [...prev, { role: 'agent', content: '', operations: [] }]);
 
-          const res2 = await fetch('/api/v1/agent/chat/stream', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(followBody),
-            signal: abortRef.current?.signal,
+          const { message: msg2, operations: ops2 } = await streamAgentResponse(
+            followBody,
+            abortRef.current?.signal,
+            (token) => {
+              setMessages((prev) => {
+                const u = [...prev];
+                const last = u[u.length - 1];
+                if (last?.role === 'agent') u[u.length - 1] = { ...last, content: last.content + token };
+                return u;
+              });
+            },
+          );
+
+          setMessages((prev) => {
+            const u = [...prev];
+            const last = u[u.length - 1];
+            if (last?.role === 'agent') u[u.length - 1] = { ...last, content: msg2, operations: ops2, needsApproval: ops2.some((o: any) => o.pending) };
+            return u;
           });
-
-          const reader2 = res2.body?.getReader();
-          if (!reader2) break;
-
-          const decoder2 = new TextDecoder();
-          let buf2 = '';
-          let msg2 = '';
-          let ops2: any[] = [];
-
-          while (true) {
-            const { done, value } = await reader2.read();
-            if (done) break;
-            buf2 += decoder2.decode(value, { stream: true });
-            const parts2 = buf2.split('\n\n');
-            buf2 = parts2.pop() || '';
-            for (const part of parts2) {
-              const lines2 = part.split('\n');
-              let et = '', ed = '';
-              for (const l of lines2) {
-                if (l.startsWith('event: ')) et = l.slice(7);
-                else if (l.startsWith('data: ')) ed = l.slice(6);
-              }
-              if (et === 'token') {
-                msg2 += ed;
-                setMessages((prev) => {
-                  const u = [...prev];
-                  const last = u[u.length - 1];
-                  if (last?.role === 'agent') u[u.length - 1] = { ...last, content: msg2 };
-                  return u;
-                });
-              } else if (et === 'done') {
-                try {
-                  const d = JSON.parse(ed);
-                  msg2 = d.message || msg2;
-                  const ops = (d.operations || []).map((op: any) => ({ ...op, pending: op.type === 'run_shell' }));
-                  ops2 = ops;
-                  setMessages((prev) => {
-                    const u = [...prev];
-                    const last = u[u.length - 1];
-                    if (last?.role === 'agent') u[u.length - 1] = { ...last, content: msg2, operations: ops, needsApproval: ops.some((o: any) => o.pending) };
-                    return u;
-                  });
-                } catch { /* ignore */ }
-              }
-            }
-          }
 
           ops = ops2;
           extraContext = '';
@@ -365,7 +287,6 @@ export default function AgentPanel({ projectPath, openFilePath, selection, onCle
         }
       }
 
-      // Normal completion — summarize and refresh
       await finalizeOps(allEditingOps);
 
     } catch (e: any) {
@@ -496,7 +417,6 @@ export default function AgentPanel({ projectPath, openFilePath, selection, onCle
 
         {messages.map((msg, i) => (
           <div key={i} className="animate-fade-in">
-            {/* User message */}
             {msg.role === 'user' && (
               <div className="px-5 py-3">
                 <div className="text-[11px] mb-1 font-medium" style={{ color: '#58a6ff' }}>You</div>
@@ -506,7 +426,6 @@ export default function AgentPanel({ projectPath, openFilePath, selection, onCle
               </div>
             )}
 
-            {/* Agent message */}
             {msg.role === 'agent' && (
               <div className="border-t" style={{ borderColor: '#21262d' }}>
                 <div className="px-5 py-3">
@@ -515,7 +434,6 @@ export default function AgentPanel({ projectPath, openFilePath, selection, onCle
                     <MessageContent text={msg.content || (i === messages.length - 1 ? '...' : '')} />
                   </div>
 
-                  {/* Approval bar — now a button that opens modal */}
                   {msg.needsApproval && (
                     <button onClick={() => setApproveMsgIdx(i)}
                       className="flex items-center gap-2 mt-3 px-3 py-2 rounded-lg w-full text-left transition-colors hover:bg-white/[0.03]"
@@ -529,7 +447,6 @@ export default function AgentPanel({ projectPath, openFilePath, selection, onCle
                     </button>
                   )}
 
-                  {/* Operations chips — subtle, below content */}
                   {msg.operations && msg.operations.length > 0 && (
                     <div className="flex flex-wrap gap-1 mt-3">
                       {msg.operations.map((op, j) => {
@@ -549,7 +466,6 @@ export default function AgentPanel({ projectPath, openFilePath, selection, onCle
                     </div>
                   )}
 
-                  {/* Shell output */}
                   {msg.shell && (
                     <div className="mt-3">
                       <div className="flex items-center justify-between text-[10px] mb-1.5 px-1">
@@ -579,7 +495,6 @@ export default function AgentPanel({ projectPath, openFilePath, selection, onCle
         ))}
       </div>
 
-      {/* Input */}
       <div className="border-t" style={{ borderColor: '#21262d', background: '#0d1117' }}>
         {injectContext && (
           <div className="px-4 pt-2">
@@ -657,7 +572,6 @@ export default function AgentPanel({ projectPath, openFilePath, selection, onCle
         <div className="absolute inset-0 z-50 flex items-center justify-center" style={{ background: 'rgba(1,4,9,0.8)' }}>
           <div className="w-[420px] rounded-xl overflow-hidden card-elevation animate-fade-in"
             style={{ background: '#161b22', border: '1px solid #30363d' }}>
-            {/* Header */}
             <div className="px-4 py-3 border-b flex items-center gap-2" style={{ borderColor: '#21262d' }}>
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#d29922" strokeWidth="2">
                 <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
@@ -669,7 +583,6 @@ export default function AgentPanel({ projectPath, openFilePath, selection, onCle
                 </svg>
               </button>
             </div>
-            {/* Body */}
             <div className="px-4 py-3 space-y-3">
               <div className="text-[11px]" style={{ color: '#8b949e' }}>
                 This command will be executed in the project directory:
@@ -683,7 +596,6 @@ export default function AgentPanel({ projectPath, openFilePath, selection, onCle
                 Commands run with a 15-second timeout; longer processes continue in the background.
               </div>
             </div>
-            {/* Footer */}
             <div className="px-4 py-2.5 border-t flex justify-end gap-2" style={{ borderColor: '#21262d', background: '#0d1117' }}>
               <button onClick={() => { handleDeny(approveMsgIdx); setApproveMsgIdx(null); }}
                 className="px-4 py-1.5 rounded text-[11px] font-medium transition-colors hover:opacity-80"

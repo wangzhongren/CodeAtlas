@@ -185,6 +185,14 @@ class OverviewRequest(PydanticBaseModel3):
 async def generate_overview(req: OverviewRequest, background_tasks: BackgroundTasks):
     """Autonomous agent: explore project and generate detailed overview."""
     result = await overview_agent.explore(req.project_path)
+    # Save overview + issues to the feature node in DB
+    if req.node_id and result.get("overview"):
+        from services.db import find_feature, update_feature_overview
+        node = find_feature(req.project_path, req.node_id)
+        if node:
+            node["flow_description"] = result["overview"]
+            node["issues_json"] = json.dumps(result.get("issues", []), ensure_ascii=False)
+            update_feature_overview(req.project_path, req.node_id, node)
     return result
 
 

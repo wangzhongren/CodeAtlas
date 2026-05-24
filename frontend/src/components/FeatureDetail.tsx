@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import type { FeatureNode } from '../types/feature';
 import { useTaskStore } from '../store/taskStore';
 
@@ -8,6 +8,7 @@ interface Props {
   onNavigateToFile: (path: string, line?: number) => void;
   onDrillDown: (node: FeatureNode) => void;
   onSendToAgent?: (context: string) => void;
+  onReloadFeatures?: () => void;
 }
 
 const COL = {
@@ -97,19 +98,19 @@ function renderInline(text: string): React.ReactNode {
   });
 }
 
-export default function FeatureDetail({ feature, projectPath, onNavigateToFile, onDrillDown, onSendToAgent }: Props) {
+export default function FeatureDetail({ feature, projectPath, onNavigateToFile, onDrillDown, onSendToAgent, onReloadFeatures }: Props) {
   const [drilling, setDrilling] = useState<string | null>(null);
   const [drillError, setDrillError] = useState<string | null>(null);
   const [overviewHtml, setOverviewHtml] = useState<string | null>(null);
   const [overviewFiles, setOverviewFiles] = useState<Array<{path:string;description:string}>>([]);
-  const [overviewIssues, setOverviewIssues] = useState<Array<{severity:string;title:string;detail:string}>>([]);
   const [overviewLoading, setOverviewLoading] = useState(false);
+  const loadingNodeIds = useRef<Set<string>>(new Set());
 
   // Collect all files from tree for overview display
   useEffect(() => {
     setOverviewHtml(null);
     setOverviewFiles([]);
-    if (!feature || feature.level > 1) return;
+    if (!feature || feature.level !== 0) return;
 
     // Collect files from all descendants
     const allFiles: Array<{path: string; description: string}> = [];
@@ -126,14 +127,15 @@ export default function FeatureDetail({ feature, projectPath, onNavigateToFile, 
     collectFiles([feature]);
     setOverviewFiles(allFiles.slice(0, 20));
 
-    // Show cached overview if available, otherwise auto-trigger once
-    if (feature.flow_description) {
-      setOverviewHtml(feature.flow_description);
-    } else {
+    // Load cached overview + issues from node data
+    const cachedOverview = feature.flow_description;
+    if (cachedOverview) {
+      setOverviewHtml(cachedOverview);
+    } else if (!loadingNodeIds.current.has(feature.id)) {
       handleRefreshOverview();
     }
 
-  }, [feature?.id]);
+  }, [feature?.id, feature?.flow_description]);
 
   if (!feature) {
     return (
@@ -147,8 +149,9 @@ export default function FeatureDetail({ feature, projectPath, onNavigateToFile, 
 
   const handleRefreshOverview = async () => {
     if (!feature || !projectPath) return;
+    if (loadingNodeIds.current.has(feature.id)) return; // already loading this node
     setOverviewLoading(true);
-    setOverviewIssues([]);
+    loadingNodeIds.current.add(feature.id);
     const allFiles: string[] = [];
     const collectFiles = (nodes: FeatureNode[]) => { for (const n of nodes) { allFiles.push(...(n.files || [])); collectFiles(n.children || []); } };
     collectFiles([feature]);
@@ -162,12 +165,16 @@ export default function FeatureDetail({ feature, projectPath, onNavigateToFile, 
       const d = await res.json();
       setOverviewHtml(d.overview || '');
       if (d.files?.length) setOverviewFiles(d.files);
-      if (d.issues?.length) setOverviewIssues(d.issues);
+      // Update parent component with cached data so re-selecting loads from cache
+      onDrillDown({ ...feature, flow_description: d.overview || feature.flow_description, generated: true });
       useTaskStore.getState().updateTask(taskId, { status: 'done', detail: `${d.issues?.length || 0} issues` });
+      // Force FeatureList to reload from DB so cached data persists across navigation
+      setTimeout(() => onReloadFeatures?.(), 500);
     } catch {
       useTaskStore.getState().updateTask(taskId, { status: 'error', detail: 'Failed' });
     }
     setOverviewLoading(false);
+    loadingNodeIds.current.delete(feature.id);
     setTimeout(() => useTaskStore.getState().removeTask(taskId), 3000);
   };
 
@@ -213,18 +220,9 @@ export default function FeatureDetail({ feature, projectPath, onNavigateToFile, 
         <span className="px-1.5 py-0.5 rounded text-[9px] font-mono shrink-0" style={{ background: LV[feature.level] + '20', color: LV[feature.level] }}>L{feature.level}</span>
         {onSendToAgent && (
           <button onClick={() => {
-            const parts = [`功能: ${feature.label}`, `描述: ${feature.flow_description || feature.description}`];
-            const of = overviewFiles.length > 0 ? overviewFiles : feature.files.map((f: string) => ({ path: f, description: '' }));
-            if (of.length) {
-              parts.push('关联文件:');
-              of.forEach((f: any) => parts.push(`  ${f.path}${f.description ? ' - ' + f.description : ''}`));
-            }
-            // Collect functions from children
-            const fns: string[] = [];
-            const collectFns = (nodes: FeatureNode[]) => { for (const n of nodes) { fns.push(...(n.functions || [])); collectFns(n.children || []); } };
-            collectFns(feature.children || []);
-            if (fns.length) parts.push(`核心函数: ${fns.join(', ')}`);
-            onSendToAgent(parts.join('\n'));
+            const files = (overviewFiles.length > 0 ? overviewFiles : feature.files.map((f: string) => ({ path: f, description: '' })))
+              .map((f: any) => f.path).filter(Boolean);
+            onSendToAgent(`当前焦点: ${feature.label}\n参考文件: ${files.join(', ') || '无'}`);
           }}
             className="text-[9px] px-2 py-0.5 rounded-full shrink-0 hover:bg-white/10 transition-colors"
             style={{ border: '1px solid #303234', color: COL.primary }}>
@@ -247,47 +245,10 @@ export default function FeatureDetail({ feature, projectPath, onNavigateToFile, 
           {/* Description block */}
           {(overviewHtml || feature.flow_description || feature.description) && (
             <div className="px-4 py-3 border-b" style={{ borderColor: COL.outlineSoft }}>
-              <div className="flex items-center justify-between mb-2">
+              <div className="mb-2">
                 <span className="text-[10px] font-medium uppercase tracking-wide" style={{ color: '#5c6166' }}>Overview</span>
-                <button onClick={handleRefreshOverview} disabled={overviewLoading}
-                  className={`text-[9px] px-1.5 py-0.5 rounded transition-colors hover:bg-white/10 disabled:opacity-30 ${overviewLoading ? 'animate-spin' : ''}`}
-                  style={{ color: '#5c6166' }} title="Refresh analysis">
-                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                    <path d="M1 4v6h6M23 20v-6h-6" /><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15" />
-                  </svg>
-                </button>
               </div>
               <Markdown text={overviewHtml || feature.flow_description || feature.description || ''} />
-            </div>
-          )}
-
-          {/* Issues */}
-          {overviewIssues.length > 0 && (
-            <div className="px-4 py-3 border-b" style={{ borderColor: COL.outlineSoft }}>
-              <div className="text-[10px] font-medium mb-2 uppercase tracking-wide" style={{ color: '#f85149' }}>Issues Found</div>
-              <div className="space-y-1.5">
-                {overviewIssues.map((issue, i) => (
-                  <div key={i} className="flex items-start gap-2 px-2 py-1.5 rounded"
-                    style={{ background: issue.severity === 'error' ? '#261212' : '#272115' }}>
-                    <span className="text-[10px] shrink-0 mt-0.5" style={{ color: issue.severity === 'error' ? '#f85149' : '#d29922' }}>
-                      {issue.severity === 'error' ? '✕' : '⚠'}
-                    </span>
-                    <div className="flex-1 min-w-0">
-                      <div className="text-[11px] font-medium" style={{ color: '#c9d1d9' }}>{issue.title}</div>
-                      <div className="text-[10px] mt-0.5" style={{ color: '#5c6166' }}>{issue.detail}</div>
-                    </div>
-                    {onSendToAgent && (
-                      <button onClick={() => onSendToAgent(
-                        `修复问题: ${issue.title}\n详情: ${issue.detail}\n关联文件: ${overviewFiles.map((f: any) => f.path).join(', ')}`
-                      )}
-                        className="text-[9px] px-2 py-0.5 rounded-full shrink-0 hover:bg-white/10 transition-colors"
-                        style={{ border: '1px solid #f8514930', color: '#f85149' }}>
-                        Fix
-                      </button>
-                    )}
-                  </div>
-                ))}
-              </div>
             </div>
           )}
 
@@ -406,7 +367,7 @@ export default function FeatureDetail({ feature, projectPath, onNavigateToFile, 
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
-                          onSendToAgent([`功能: ${feature.label} → ${node.label}`, node.files.length ? `文件: ${node.files.join(', ')}` : '', node.functions.length ? `函数: ${node.functions.join(', ')}` : ''].filter(Boolean).join('\n'));
+                          onSendToAgent(`当前焦点: ${feature.label} → ${node.label}\n文件: ${(node.files || []).join(', ') || '无'}`);
                         }} className="text-[9px] px-2 py-0.5 rounded-full hover:bg-white/10 ml-2"
                         style={{ border: '1px solid #303234', color: COL.primary }} title="Send to Agent">
                         <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
