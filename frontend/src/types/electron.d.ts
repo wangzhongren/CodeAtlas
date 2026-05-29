@@ -16,6 +16,7 @@ export interface EditResult {
   success: boolean;
   error?: string;
   file?: string;
+  backupId?: string;
 }
 
 export interface CodeAtlasAPI {
@@ -27,6 +28,7 @@ export interface CodeAtlasAPI {
     insertLines: (filePath: string, afterLine: number, content: string) => Promise<EditResult>;
     replaceLines: (filePath: string, startLine: number, endLine: number, content: string) => Promise<EditResult>;
     deleteLines: (filePath: string, startLine: number, endLine: number) => Promise<EditResult>;
+    restoreBackup: (backupId: string) => Promise<EditResult>;
     getProjectPath: () => Promise<string>;
     onProjectOpened: (cb: (path: string) => void) => void;
   };

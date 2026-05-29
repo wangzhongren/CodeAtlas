@@ -14,6 +14,7 @@ const api = {
       ipcRenderer.invoke('file:replaceLines', filePath, startLine, endLine, content),
     deleteLines: (filePath: string, startLine: number, endLine: number) =>
       ipcRenderer.invoke('file:deleteLines', filePath, startLine, endLine),
+    restoreBackup: (backupId: string) => ipcRenderer.invoke('file:restoreBackup', backupId),
     getProjectPath: () => ipcRenderer.invoke('file:getProjectPath'),
     onProjectOpened: (cb: (path: string) => void) => {
       ipcRenderer.on('project:opened', (_e, p: string) => cb(p));

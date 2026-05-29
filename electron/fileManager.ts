@@ -19,6 +19,7 @@ export interface EditResult {
   success: boolean;
   error?: string;
   file?: string;
+  backupId?: string;
 }
 
 const IGNORE_PATTERNS = [
@@ -78,12 +79,64 @@ export function readFile(filePath: string, startLine?: number, endLine?: number)
   };
 }
 
+function findProjectRoot(filePath: string): string {
+  let current = fs.existsSync(filePath) && fs.statSync(filePath).isDirectory()
+    ? filePath
+    : path.dirname(filePath);
+  while (current !== path.dirname(current)) {
+    if (fs.existsSync(path.join(current, '.git')) || fs.existsSync(path.join(current, '.codeatlas'))) {
+      return current;
+    }
+    current = path.dirname(current);
+  }
+  return path.dirname(filePath);
+}
+
+function createBackup(filePath: string, operation: string): string | undefined {
+  try {
+    if (!fs.existsSync(filePath)) return undefined;
+    const root = findProjectRoot(filePath);
+    const rel = path.relative(root, filePath);
+    const id = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const backupDir = path.join(root, '.codeatlas', 'backups', id);
+    fs.mkdirSync(backupDir, { recursive: true });
+    const backupFile = path.join(backupDir, 'before');
+    fs.copyFileSync(filePath, backupFile);
+    fs.writeFileSync(path.join(backupDir, 'meta.json'), JSON.stringify({
+      id,
+      operation,
+      file: rel,
+      createdAt: new Date().toISOString(),
+    }, null, 2), 'utf-8');
+    return id;
+  } catch {
+    return undefined;
+  }
+}
+
+export function restoreBackup(projectPath: string, backupId: string): EditResult {
+  try {
+    const backupDir = path.join(projectPath, '.codeatlas', 'backups', backupId);
+    const metaPath = path.join(backupDir, 'meta.json');
+    const backupFile = path.join(backupDir, 'before');
+    const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+    const target = path.join(projectPath, meta.file);
+    const dir = path.dirname(target);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.copyFileSync(backupFile, target);
+    return { success: true, file: target, backupId };
+  } catch (e: any) {
+    return { success: false, error: e.message };
+  }
+}
+
 export function writeFile(filePath: string, content: string): EditResult {
   try {
+    const backupId = createBackup(filePath, 'write_file');
     const dir = path.dirname(filePath);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(filePath, content, 'utf-8');
-    return { success: true, file: filePath };
+    return { success: true, file: filePath, backupId };
   } catch (e: any) {
     return { success: false, error: e.message, file: filePath };
   }
@@ -91,11 +144,12 @@ export function writeFile(filePath: string, content: string): EditResult {
 
 export function insertLines(filePath: string, afterLine: number, content: string): EditResult {
   try {
+    const backupId = createBackup(filePath, 'insert_lines');
     const fc = readFile(filePath);
     const newLines = [...fc.lines];
     newLines.splice(afterLine, 0, ...content.split('\n'));
     fs.writeFileSync(filePath, newLines.join('\n'), 'utf-8');
-    return { success: true, file: filePath };
+    return { success: true, file: filePath, backupId };
   } catch (e: any) {
     return { success: false, error: e.message, file: filePath };
   }
@@ -105,11 +159,12 @@ export function replaceLines(
   filePath: string, startLine: number, endLine: number, content: string
 ): EditResult {
   try {
+    const backupId = createBackup(filePath, 'replace_lines');
     const fc = readFile(filePath);
     const newLines = [...fc.lines];
     newLines.splice(startLine - 1, endLine - startLine + 1, ...content.split('\n'));
     fs.writeFileSync(filePath, newLines.join('\n'), 'utf-8');
-    return { success: true, file: filePath };
+    return { success: true, file: filePath, backupId };
   } catch (e: any) {
     return { success: false, error: e.message, file: filePath };
   }
@@ -117,11 +172,12 @@ export function replaceLines(
 
 export function deleteLines(filePath: string, startLine: number, endLine: number): EditResult {
   try {
+    const backupId = createBackup(filePath, 'delete_lines');
     const fc = readFile(filePath);
     const newLines = [...fc.lines];
     newLines.splice(startLine - 1, endLine - startLine + 1);
     fs.writeFileSync(filePath, newLines.join('\n'), 'utf-8');
-    return { success: true, file: filePath };
+    return { success: true, file: filePath, backupId };
   } catch (e: any) {
     return { success: false, error: e.message, file: filePath };
   }

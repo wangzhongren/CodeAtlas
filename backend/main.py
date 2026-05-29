@@ -21,6 +21,7 @@ from services.feature_persistence import load, find_node
 from services.db import upsert_feature, update_feature_children
 from services.change_summarizer import change_summarizer
 from services.change_queue import change_queue
+from services.map_search import search_project_map
 from models.feature import AnalyzeFeaturesRequest
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
@@ -204,6 +205,13 @@ async def get_features(project_path: str = ""):
         return {"features": [], "last_updated": ""}
     features = load(project_path)
     return {"features": features, "last_updated": ""}
+
+
+@app.get("/api/v1/features/search")
+async def search_features(project_path: str = "", query: str = "", limit: int = 8):
+    if not project_path or not query.strip():
+        return {"features": [], "symbols": []}
+    return search_project_map(project_path, query, max(1, min(limit, 20)))
 
 
 @app.post("/api/v1/features/analyze")

@@ -6,6 +6,7 @@ import {
   listDirectory, readFile, writeFile,
   insertLines, replaceLines, deleteLines,
   runShell, killShell, getShellLogFile, readLogFile,
+  restoreBackup,
 } from './fileManager';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -64,6 +65,10 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle('file:deleteLines', (_e, filePath: string, startLine: number, endLine: number) => {
     return deleteLines(resolveProjectPath(filePath), startLine, endLine);
+  });
+
+  ipcMain.handle('file:restoreBackup', (_e, backupId: string) => {
+    return restoreBackup(projectPath, backupId);
   });
 
   // Shell execution — streaming via event

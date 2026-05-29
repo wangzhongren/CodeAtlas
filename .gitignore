@@ -1,4 +1,6 @@
 node_modules/
+backend/.venv/
+backend/.venv*/
 dist/
 dist-electron/
 release/

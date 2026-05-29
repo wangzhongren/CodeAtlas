@@ -38,6 +38,51 @@ interface Message {
   needsApproval?: boolean;
 }
 
+interface MapSearchResult {
+  features?: Array<{
+    id: string;
+    label: string;
+    level: number;
+    description?: string;
+    flow_description?: string;
+    files?: string[];
+    functions?: string[];
+  }>;
+  symbols?: Array<{
+    name: string;
+    kind: string;
+    file: string;
+    line: number;
+    preview?: string;
+  }>;
+}
+
+function formatMapContext(result: MapSearchResult): string {
+  const features = result.features || [];
+  const symbols = result.symbols || [];
+  if (features.length === 0 && symbols.length === 0) return '';
+
+  const lines = ['【项目地图查询结果】'];
+  if (features.length > 0) {
+    lines.push('相关功能节点:');
+    for (const feature of features.slice(0, 5)) {
+      lines.push(`- ${feature.label} (${feature.id}, level ${feature.level})`);
+      if (feature.description) lines.push(`  描述: ${feature.description}`);
+      if (feature.flow_description) lines.push(`  流程: ${feature.flow_description.slice(0, 300)}`);
+      if (feature.files?.length) lines.push(`  文件: ${feature.files.slice(0, 5).join(', ')}`);
+      if (feature.functions?.length) lines.push(`  函数: ${feature.functions.slice(0, 8).join(', ')}`);
+    }
+  }
+  if (symbols.length > 0) {
+    lines.push('真实代码符号:');
+    for (const symbol of symbols.slice(0, 8)) {
+      lines.push(`- ${symbol.kind} ${symbol.name} at ${symbol.file}:${symbol.line}${symbol.preview ? ` — ${symbol.preview}` : ''}`);
+    }
+  }
+  lines.push('请优先基于这些地图和符号证据回答；如果证据不足，继续用 read_file 读取相关文件。');
+  return lines.join('\n');
+}
+
 /* ── Render message content with code blocks ── */
 function MessageContent({ text }: { text: string }) {
   const blocks = useMemo(() => {
@@ -99,6 +144,7 @@ export default function AgentPanel({ projectPath, openFilePath, selection, onCle
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [approveMsgIdx, setApproveMsgIdx] = useState<number | null>(null);
+  const [approving, setApproving] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const pendingOpsRef = useRef<Array<{ file?: string; type: string; content?: string }>>([]);
@@ -153,10 +199,30 @@ export default function AgentPanel({ projectPath, openFilePath, selection, onCle
         }
       }
 
+      let mapContext = '';
+      if (projectPath) {
+        try {
+          const params = new URLSearchParams({
+            project_path: projectPath,
+            query: instruction,
+            limit: '8',
+          });
+          const res = await fetch(`/api/v1/features/search?${params.toString()}`);
+          if (res.ok) {
+            mapContext = formatMapContext(await res.json());
+          }
+        } catch (e) {
+          console.warn('[Agent] map search failed:', e);
+        }
+      }
+
       let fullInstruction = instruction;
       if (projectPath) {
         const projName = projectPath.split(/[\\/]/).pop() || projectPath;
         fullInstruction = `【当前项目: ${projName}，路径: ${projectPath}】\n${instruction}`;
+      }
+      if (mapContext) {
+        fullInstruction += `\n\n${mapContext}`;
       }
       if (fileTree && fileTree.length > 0) {
         fullInstruction += `\n\n项目文件列表:\n${JSON.stringify(fileTree, null, 2)}`;
@@ -317,51 +383,73 @@ export default function AgentPanel({ projectPath, openFilePath, selection, onCle
     }
   };
 
-  const executeShellOp = async (op: any) => {
+  const executeShellOp = async (op: any, msgIdx?: number): Promise<void> => {
     const cmd = op.content || '';
     if (!cmd) return;
-    const taskId = `shell_${Date.now()}`;
-    useTaskStore.getState().addTask({ id: taskId, type: 'shell', label: cmd.slice(0, 50), status: 'running', startedAt: Date.now(), detail: 'Starting...' });
-    const shellId = window.codeatlas.shell.run(cmd);
-    const st: ShellState = { id: shellId, command: cmd, output: '', running: true, exitCode: null };
-    setMessages((prev) => {
-      const u = [...prev];
-      for (let i = u.length - 1; i >= 0; i--) {
-        if (u[i].role === 'agent') { u[i] = { ...u[i], shell: st }; break; }
-      }
-      return u;
-    });
-    window.codeatlas.shell.onData((id, data) => {
-      if (id !== shellId) return;
-      useTaskStore.getState().updateTask(taskId, { detail: (data || '').slice(-60) });
+    return new Promise((resolve) => {
+      const taskId = `shell_${Date.now()}`;
+      useTaskStore.getState().addTask({ id: taskId, type: 'shell', label: cmd.slice(0, 50), status: 'running', startedAt: Date.now(), detail: 'Starting...' });
+      const shellId = window.codeatlas.shell.run(cmd);
+      const st: ShellState = { id: shellId, command: cmd, output: '', running: true, exitCode: null };
       setMessages((prev) => {
         const u = [...prev];
-        for (let i = u.length - 1; i >= 0; i--) {
-          if (u[i].shell?.id === shellId) {
-            u[i] = { ...u[i], shell: { ...u[i].shell!, output: u[i].shell!.output + data } };
-            break;
+        let targetIdx = msgIdx ?? -1;
+        if (targetIdx < 0) {
+          for (let i = u.length - 1; i >= 0; i--) {
+            if (u[i].role === 'agent') { targetIdx = i; break; }
           }
         }
+        if (targetIdx >= 0) u[targetIdx] = { ...u[targetIdx], shell: st };
         return u;
       });
-    });
-    window.codeatlas.shell.onDone((id, code) => {
-      if (id !== shellId) return;
-      useTaskStore.getState().updateTask(taskId, { status: code === 0 ? 'done' : 'error', exitCode: code, detail: `Exit code: ${code}` });
-      setMessages((prev) => {
-        const u = [...prev];
-        for (let i = u.length - 1; i >= 0; i--) {
-          if (u[i].shell?.id === shellId) {
-            u[i] = { ...u[i], shell: { ...u[i].shell!, running: false, exitCode: code } };
-            break;
+      window.codeatlas.shell.onData((id, data) => {
+        if (id !== shellId) return;
+        useTaskStore.getState().updateTask(taskId, { detail: (data || '').slice(-60) });
+        setMessages((prev) => {
+          const u = [...prev];
+          for (let i = u.length - 1; i >= 0; i--) {
+            if (u[i].shell?.id === shellId) {
+              u[i] = { ...u[i], shell: { ...u[i].shell!, output: u[i].shell!.output + data } };
+              break;
+            }
           }
-        }
-        return u;
+          return u;
+        });
+      });
+      window.codeatlas.shell.onDone((id, code) => {
+        if (id !== shellId) return;
+        useTaskStore.getState().updateTask(taskId, { status: code === 0 ? 'done' : 'error', exitCode: code, detail: `Exit code: ${code}` });
+        setMessages((prev) => {
+          const u = [...prev];
+          for (let i = u.length - 1; i >= 0; i--) {
+            if (u[i].shell?.id === shellId) {
+              u[i] = { ...u[i], shell: { ...u[i].shell!, running: false, exitCode: code } };
+              break;
+            }
+          }
+          return u;
+        });
+        resolve();
+      });
+      window.codeatlas.shell.onError((id, error) => {
+        if (id !== shellId) return;
+        useTaskStore.getState().updateTask(taskId, { status: 'error', detail: error });
+        setMessages((prev) => {
+          const u = [...prev];
+          for (let i = u.length - 1; i >= 0; i--) {
+            if (u[i].shell?.id === shellId) {
+              u[i] = { ...u[i], shell: { ...u[i].shell!, output: `${u[i].shell!.output}\n[error: ${error}]`, running: false, exitCode: -1 } };
+              break;
+            }
+          }
+          return u;
+        });
+        resolve();
       });
     });
   };
 
-  const handleDeny = (msgIdx: number) => {
+  const handleDeny = async (msgIdx: number) => {
     setMessages((prev) => {
       const u = [...prev];
       const msg = u[msgIdx];
@@ -370,36 +458,36 @@ export default function AgentPanel({ projectPath, openFilePath, selection, onCle
       }
       return u;
     });
+    await finalizeOps(pendingOpsRef.current.filter((o: any) => o.type !== 'run_shell'));
+    pendingShellRef.current = [];
+    pendingOpsRef.current = [];
   };
 
   const handleApprove = async (msgIdx: number) => {
-    setMessages((prev) => {
-      const u = [...prev];
-      const msg = u[msgIdx];
-      if (msg?.operations) {
-        u[msgIdx] = { ...msg, operations: msg.operations.map((o: any) => ({ ...o, pending: false })), needsApproval: false };
-      }
-      return u;
-    });
-    const msg = messages[msgIdx];
-    const shellOps = msg?.operations?.filter((o: any) => o.type === 'run_shell') || [];
+    if (approving) return;
+    setApproving(true);
+    try {
+      const msg = messages[msgIdx];
+      const shellOps = msg?.operations?.filter((o: any) => o.type === 'run_shell') || [];
+      setMessages((prev) => {
+        const u = [...prev];
+        const msg = u[msgIdx];
+        if (msg?.operations) {
+          u[msgIdx] = { ...msg, operations: msg.operations.map((o: any) => ({ ...o, pending: false })), needsApproval: false };
+        }
+        return u;
+      });
 
-    for (const op of shellOps) {
-      const cmd = (op.content || '').trim();
-      let timedOut = false;
-      const timeout = new Promise<void>((resolve) => setTimeout(() => { timedOut = true; resolve(); }, 15000));
-      await Promise.race([executeShellOp(op), timeout]);
-      if (timedOut) {
-        setMessages((prev) => [...prev, {
-          role: 'agent',
-          content: `\`\`\`\nStill running in background: ${cmd.slice(0, 60)}\nCheck status bar.\n\`\`\``,
-        }]);
+      for (const op of shellOps) {
+        await executeShellOp(op, msgIdx);
       }
+
+      await finalizeOps(pendingOpsRef.current);
+      pendingShellRef.current = [];
+      pendingOpsRef.current = [];
+    } finally {
+      setApproving(false);
     }
-
-    await finalizeOps(pendingOpsRef.current);
-    pendingShellRef.current = [];
-    pendingOpsRef.current = [];
   };
 
   return (
@@ -442,7 +530,7 @@ export default function AgentPanel({ projectPath, openFilePath, selection, onCle
                         <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
                       </svg>
                       <span className="text-[11px]" style={{ color: '#d29922' }}>
-                        Shell command needs approval — click to review
+                        Command approval required
                       </span>
                     </button>
                   )}
@@ -576,8 +664,8 @@ export default function AgentPanel({ projectPath, openFilePath, selection, onCle
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#d29922" strokeWidth="2">
                 <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
               </svg>
-              <span className="text-xs font-medium flex-1" style={{ color: '#e3e2e6' }}>Approve Shell Command</span>
-              <button onClick={() => setApproveMsgIdx(null)} style={{ color: '#484f58' }}>
+              <span className="text-xs font-medium flex-1" style={{ color: '#e3e2e6' }}>Review Command</span>
+              <button disabled={approving} onClick={() => setApproveMsgIdx(null)} style={{ color: '#484f58' }}>
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                   <path d="M18 6L6 18M6 6l12 12" />
                 </svg>
@@ -585,27 +673,30 @@ export default function AgentPanel({ projectPath, openFilePath, selection, onCle
             </div>
             <div className="px-4 py-3 space-y-3">
               <div className="text-[11px]" style={{ color: '#8b949e' }}>
-                This command will be executed in the project directory:
+                The agent wants to run this command in:
+              </div>
+              <div className="rounded-md px-2 py-1 font-mono text-[10px] truncate" style={{ background: '#0d1117', color: '#8b949e', border: '1px solid #21262d' }}>
+                {projectPath || '(no project open)'}
               </div>
               {messages[approveMsgIdx].operations?.filter((o: any) => o.type === 'run_shell').map((op: any, j: number) => (
-                <div key={j} className="rounded-lg p-3 font-mono text-[12px]" style={{ background: '#0d1117', color: '#7ee787', border: '1px solid #21262d' }}>
+                <div key={j} className="rounded-lg p-3 font-mono text-[12px] whitespace-pre-wrap break-words" style={{ background: '#0d1117', color: '#7ee787', border: '1px solid #21262d' }}>
                   $ {op.content}
                 </div>
               ))}
-              <div className="text-[10px]" style={{ color: '#d29922' }}>
-                Commands run with a 15-second timeout; longer processes continue in the background.
+              <div className="text-[10px]" style={{ color: '#8b949e' }}>
+                Allowing this command streams output below and keeps running until it exits or you stop it.
               </div>
             </div>
             <div className="px-4 py-2.5 border-t flex justify-end gap-2" style={{ borderColor: '#21262d', background: '#0d1117' }}>
-              <button onClick={() => { handleDeny(approveMsgIdx); setApproveMsgIdx(null); }}
+              <button disabled={approving} onClick={() => { handleDeny(approveMsgIdx); setApproveMsgIdx(null); }}
                 className="px-4 py-1.5 rounded text-[11px] font-medium transition-colors hover:opacity-80"
                 style={{ background: '#21262d', color: '#c9d1d9' }}>
                 Deny
               </button>
-              <button onClick={() => { handleApprove(approveMsgIdx); setApproveMsgIdx(null); }}
+              <button disabled={approving} onClick={() => { handleApprove(approveMsgIdx); setApproveMsgIdx(null); }}
                 className="px-4 py-1.5 rounded text-[11px] font-medium transition-colors hover:opacity-80"
                 style={{ background: '#238636', color: '#fff' }}>
-                Approve & Run
+                {approving ? 'Running...' : 'Allow'}
               </button>
             </div>
           </div>
